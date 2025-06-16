@@ -18,6 +18,7 @@ const PORT = process.env.PORT || 5004;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 console.log("🔑 OpenRouter API Key:", OPENROUTER_API_KEY);
 
+const marked = require('marked');
 // ✅ Generate PDF using Puppeteer
 async function generatePDF(content) {
     const outputDir = path.join(__dirname, 'output');
@@ -26,6 +27,10 @@ async function generatePDF(content) {
     }
 
     const pdfPath = path.join(outputDir, 'documentation.pdf');
+
+    // Convert Markdown to HTML
+    const htmlContent = marked.parse(content);
+
     const browser = await puppeteer.launch();
     const page = await browser.newPage();
 
@@ -35,42 +40,34 @@ async function generatePDF(content) {
                 <title>Colab Documentation</title>
                 <style>
                     body {
-                        font-family: Arial, sans-serif;
-                        padding: 20px;
+                        font-family: 'Segoe UI', sans-serif;
+                        padding: 30px;
                         line-height: 1.6;
                         color: #333;
+                        background-color: #fff;
                     }
-                    h1, h2, h3, h4 {
-                        color: rgb(106, 0, 255);
-                        margin-bottom: 10px;
+                    h1, h2, h3 {
+                        color: #5a00cc;
+                        margin-top: 20px;
                     }
-                    h1 {
-                        font-size: 28px;
+                    code {
+                        background: #f5f5f5;
+                        padding: 2px 5px;
+                        border-radius: 4px;
                     }
-                    h2 {
-                        font-size: 24px;
+                    pre {
+                        background: #f5f5f5;
+                        padding: 10px;
+                        overflow-x: auto;
+                        border-radius: 4px;
                     }
-                    h3 {
-                        font-size: 20px;
-                    }
-                    p {
-                        margin: 8px 0;
-                    }
-                    .section {
-                        margin-bottom: 20px;
-                    }
-                    .highlight {
-                        color: #333;
-                        background-color: #f4f4f4;
-                        padding: 5px;
-                        border-radius: 5px;
+                    ul {
+                        margin-left: 20px;
                     }
                 </style>
             </head>
             <body>
-                <div class="section">
-                    ${content.replace(/\n/g, '<br>')}
-                </div>
+                ${htmlContent}
             </body>
         </html>
     `);
@@ -90,8 +87,6 @@ app.get('/download', (req, res) => {
         res.status(404).json({ error: "PDF not found. Please generate it first." });
     }
 });
-
-// ✅ Upload Multiple Colab Notebooks and Generate Documentation
 app.post('/upload', async (req, res) => {
     const { notebooks, language } = req.body;
     if (!notebooks || notebooks.length === 0) {
@@ -99,6 +94,7 @@ app.post('/upload', async (req, res) => {
     }
 
     try {
+        // Step 1: Process notebooks and generate base content
         const contents = notebooks.map((notebook, index) => {
             const filePath = path.join(__dirname, 'scripts', `uploaded_notebook_${index}.ipynb`);
             fs.writeFileSync(filePath, notebook);
@@ -107,8 +103,8 @@ app.post('/upload', async (req, res) => {
             return result.markdown.concat(result.code).join("\n");
         }).join("\n\n");
 
-        // ✅ Call AI to Generate Documentation
-        const prompt = `
+        // Step 2: Get initial raw documentation from first model
+        const firstPrompt = `
 You are a professional technical writer and software architect. Your task is to generate a comprehensive and professional documentation for the given code. The documentation should be suitable for knowledge transfer or project handover. It should explain the code's purpose, logic, and architecture clearly and concisely.
 
 Guidelines:
@@ -164,13 +160,13 @@ Now, generate the documentation accordingly:
 ${contents}
 `;
 
-        const response = await axios.post(
+        const baseDocResponse = await axios.post(
             'https://openrouter.ai/api/v1/chat/completions',
             {
                 model: 'google/gemma-3-4b-it:free',
-                messages: [{ role: 'user', content: prompt }],
+                messages: [{ role: 'user', content: firstPrompt }],
                 temperature: 0.7,
-                max_tokens: 2000,
+                max_tokens: 2048,
             },
             {
                 headers: {
@@ -180,20 +176,53 @@ ${contents}
             }
         );
 
-        const aiResponse = response.data.choices[0].message.content;
-        const cleanContent = aiResponse.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/##(.*?)\n/g, '<h2>$1</h2>').replace(/#(.*?)\n/g, '<h1>$1</h1>').replace(/\n/g, '<br>');
+        const baseDoc = baseDocResponse.data.choices[0].message.content;
 
-        console.log("Generated Documentation:", cleanContent);
+        // Step 3: Enhance with second model for styling, markdown emojis, formatting
+        const enhancementPrompt = `
+🎯 You are a markdown formatter and technical storyteller.
 
-        // ✅ Generate PDF from the AI-generated documentation
-        await generatePDF(cleanContent);
+Take the following plain documentation and transform it into a beautifully formatted, engaging markdown document. Use:
+- Emojis to represent sections (like 🚀 Overview, 🧠 Logic, 🔧 Techniques)
+- Bullet points, tables, and headings where needed
+- Keep it professional but attractive for blogs or internal reports
+- Do not rewrite the logic — only improve structure and formatting
 
-        res.json({ documentation: aiResponse });
+Here’s the documentation to enhance:
+${baseDoc}
+        `;
+
+        const styledDocResponse = await axios.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            {
+                model: 'google/gemma-3-4b-it:free',
+                messages: [{ role: 'user', content: enhancementPrompt }],
+                temperature: 0.7,
+                max_tokens: 2048,
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
+
+        const finalDoc = styledDocResponse.data.choices[0].message.content;
+
+        console.log("✅ Final Enhanced Documentation Generated");
+                await generatePDF(finalDoc);
+
+
+        res.json({ documentation: finalDoc });
+
     } catch (error) {
         console.error("❌ Error during documentation generation:", error.message);
-        res.status(500).json({ error: 'Error processing multiple notebooks' });
+        res.status(500).json({ error: 'Error processing notebooks and formatting' });
     }
 });
+
+
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
