@@ -19,6 +19,7 @@
     "express-validator": "^7.2.1",
     "jsonwebtoken": "^9.0.2",
     "marked": "^15.0.12",
+    "openai": "^5.20.3",
     "puppeteer": "^24.4.0"
   }
 }
